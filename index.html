@@ -8,7 +8,7 @@
 </head>
 <body>
   <header>
-    <h1>Abnehm-Buddy</h1>
+    <h1>Abnehm-Buddy <span id="sync-badge" class="muted"></span></h1>
     <nav>
       <button data-tab="heute" class="active">Heute</button>
       <button data-tab="verlauf">Verlauf</button>
@@ -192,8 +192,21 @@
       </div>
 
       <div class="card">
+        <h2>Synchronisation (Handy ↔ PC)</h2>
+        <p class="muted">Trag auf jedem Gerät einmal deinen Schlüssel ein. Danach gleichen sich Einträge, Fotos, Personen und Motivationsbilder automatisch ab, gespeichert in deinem privaten GitHub-Repo. Den Gemini-Key trägst du auf jedem Gerät selbst ein, er wird nicht mit abgeglichen. Wie du den Schlüssel bekommst, steht in der README.</p>
+        <label>Schlüssel (GitHub-Token) <input id="sync-token" type="password" placeholder="github_pat_..." autocomplete="off"></label>
+        <label>Name des Daten-Repos <input id="sync-repo" placeholder="abnehm-buddy-daten"></label>
+        <div class="actions">
+          <button id="sync-save" class="primary">Verbinden</button>
+          <button id="sync-now">Jetzt synchronisieren</button>
+          <button id="sync-off">Ausschalten</button>
+        </div>
+        <p id="sync-status" class="muted"></p>
+      </div>
+
+      <div class="card">
         <h2>Daten</h2>
-        <p class="muted">Alles liegt nur in diesem Browser. Mach ab und zu ein Backup.</p>
+        <p class="muted">Ohne Synchronisation liegt alles nur in diesem Browser. Ein Backup als Datei schadet trotzdem nie.</p>
         <div class="actions">
           <button id="export-btn">Backup herunterladen</button>
           <label class="file-btn">Backup laden <input type="file" id="import-input" accept="application/json"></label>
