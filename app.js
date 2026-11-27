@@ -1,5 +1,6 @@
 // Abnehm-Buddy – alles läuft im Browser. Daten: localStorage (Einträge) + IndexedDB (Fotos).
 // KI: Google Gemini API (kostenloser Tarif), direkt aus dem Browser aufgerufen.
+const APP_VERSION = "4 (27.11.2026)";
 const GEMINI_URL = (model) => `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(model)}:generateContent`;
 
 // ---------- Speicher ----------
@@ -898,6 +899,7 @@ document.addEventListener("visibilitychange", () => {
 window.addEventListener("online", () => scheduleSync());
 
 // ---------- Start ----------
+$("app-version").textContent = "Version " + APP_VERSION;
 $("entry-date").value = todayIso();
 loadDay(todayIso());
 renderAll();
