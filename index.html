@@ -1,0 +1,209 @@
+<!doctype html>
+<html lang="de">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Abnehm-Buddy</title>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <header>
+    <h1>Abnehm-Buddy</h1>
+    <nav>
+      <button data-tab="heute" class="active">Heute</button>
+      <button data-tab="verlauf">Verlauf</button>
+      <button data-tab="fotos">Fotos</button>
+      <button data-tab="motivation">Motivation</button>
+      <button data-tab="personen">Personen</button>
+      <button data-tab="einstellungen">Einstellungen</button>
+    </nav>
+  </header>
+
+  <main>
+    <!-- HEUTE -->
+    <section id="tab-heute" class="tab active">
+      <div id="slideshow-card" class="card slideshow hidden">
+        <figure>
+          <img id="slide-img" alt="Motivationsbild">
+          <figcaption id="slide-caption"></figcaption>
+        </figure>
+        <div class="slide-controls">
+          <button id="slide-prev" aria-label="Vorheriges Bild">◀</button>
+          <span id="slide-count" class="muted"></span>
+          <button id="slide-pause" aria-label="Pause">⏸</button>
+          <button id="slide-next" aria-label="Nächstes Bild">▶</button>
+        </div>
+      </div>
+
+      <div class="card">
+        <h2>Gewicht <span id="today-label" class="muted"></span></h2>
+        <div class="row">
+          <label>Datum <input type="date" id="entry-date"></label>
+        </div>
+        <div class="row">
+          <label>Morgens (kg) <input type="number" step="0.1" id="w-morning" placeholder="z. B. 82.4"></label>
+          <label>Abends (kg) <input type="number" step="0.1" id="w-evening" placeholder="z. B. 83.1"></label>
+        </div>
+      </div>
+
+      <div class="card">
+        <h2>Kalorien</h2>
+        <div class="row">
+          <label>Gegessen (kcal) <input type="number" id="kcal-in" placeholder="z. B. 1600"></label>
+          <label>Durch Sport verbrannt (kcal) <input type="number" id="kcal-sport" placeholder="z. B. 400"></label>
+        </div>
+        <div id="deficit-box" class="deficit"></div>
+      </div>
+
+      <div class="card">
+        <h2>Foto (optional)</h2>
+        <input type="file" id="photo-input" accept="image/*" capture="environment">
+        <img id="photo-preview" class="preview hidden" alt="Vorschau">
+      </div>
+
+      <div class="actions">
+        <button id="save-btn" class="primary">Speichern</button>
+        <button id="feedback-btn">Speichern + Feedback holen</button>
+      </div>
+
+      <div class="card">
+        <h2>Feedback</h2>
+        <div id="feedback-list"></div>
+      </div>
+    </section>
+
+    <!-- VERLAUF -->
+    <section id="tab-verlauf" class="tab">
+      <div class="card">
+        <h2>Gewichtsverlauf (morgens)</h2>
+        <div id="chart"></div>
+        <p id="trend-text" class="muted"></p>
+      </div>
+      <div class="card">
+        <h2>Alle Einträge</h2>
+        <div class="table-wrap"><table id="entries-table"></table></div>
+      </div>
+    </section>
+
+    <!-- FOTOS -->
+    <section id="tab-fotos" class="tab">
+      <div class="card">
+        <h2>Fotos</h2>
+        <div id="photo-grid" class="grid"></div>
+      </div>
+    </section>
+
+    <!-- MOTIVATION -->
+    <section id="tab-motivation" class="tab">
+      <div class="card">
+        <h2>Motivationsbilder hinzufügen</h2>
+        <p class="muted">Diese Bilder laufen jeden Tag als Diashow oben auf „Heute“, jeden Tag in neuer Reihenfolge. Zum Beispiel: das Outfit, in das du passen willst, dein Urlaubsziel, ein altes Foto von dir, ein Spruch.</p>
+        <label>Bildunterschrift (optional, gilt für alle ausgewählten Bilder)
+          <input id="m-caption" placeholder="z. B. Sommer 2027: Kroatien">
+        </label>
+        <label class="file-btn">Bilder auswählen <input type="file" id="m-input" accept="image/*" multiple></label>
+      </div>
+      <div class="card">
+        <h2>Deine Bilder</h2>
+        <div id="m-grid" class="grid"></div>
+      </div>
+    </section>
+
+    <!-- PERSONEN -->
+    <section id="tab-personen" class="tab">
+      <div class="card">
+        <h2>Person hinzufügen</h2>
+        <p class="muted">Die KI schreibt im Stil dieser Person. Die Person selbst erfährt davon nichts.</p>
+        <div class="row">
+          <label>Name <input id="p-name" placeholder="z. B. Lisa"></label>
+          <label>Alter <input id="p-age" type="number" placeholder="34"></label>
+        </div>
+        <div class="row">
+          <label>Beziehung zu dir <input id="p-rel" placeholder="z. B. beste Freundin, Partner, große Schwester"></label>
+        </div>
+        <label>Wie redet die Person? (optional)
+          <textarea id="p-style" rows="3" placeholder="z. B. direkt, sarkastisch, nennt mich 'Maus', viele Emojis, schwäbischer Dialekt"></textarea>
+        </label>
+        <button id="p-add" class="primary">Hinzufügen</button>
+      </div>
+      <div class="card">
+        <h2>Deine Leute</h2>
+        <div id="persons-list"></div>
+        <label>Wer antwortet?
+          <select id="persona-mode">
+            <option value="random">Zufällig</option>
+            <option value="all">Alle nacheinander</option>
+          </select>
+        </label>
+      </div>
+    </section>
+
+    <!-- EINSTELLUNGEN -->
+    <section id="tab-einstellungen" class="tab">
+      <div class="card">
+        <h2>Dein Grundumsatz</h2>
+        <p class="muted">Wird gebraucht, um das Defizit zu berechnen: Defizit = Grundbedarf + Sport − Gegessen.</p>
+        <div class="row">
+          <label>Geschlecht
+            <select id="s-sex"><option value="f">weiblich</option><option value="m">männlich</option></select>
+          </label>
+          <label>Alter <input id="s-age" type="number"></label>
+        </div>
+        <div class="row">
+          <label>Größe (cm) <input id="s-height" type="number"></label>
+          <label>Alltag (ohne Sport)
+            <select id="s-activity">
+              <option value="1.2">Sitzend (Büro)</option>
+              <option value="1.375">Leicht aktiv</option>
+              <option value="1.55">Viel auf den Beinen</option>
+            </select>
+          </label>
+        </div>
+        <label>Grundbedarf manuell (kcal, überschreibt die Berechnung)
+          <input id="s-tdee" type="number" placeholder="leer lassen = automatisch">
+        </label>
+        <p id="tdee-info" class="muted"></p>
+      </div>
+
+      <div class="card">
+        <h2>KI (Google Gemini, kostenlos)</h2>
+        <p class="muted">Kostenlosen Key mit deinem privaten Google-Konto auf <a href="https://aistudio.google.com/apikey" target="_blank" rel="noopener">aistudio.google.com/apikey</a> erstellen. Der Key bleibt nur in diesem Browser und geht direkt an Google.</p>
+        <label>Gemini API-Key <input id="s-key" type="password" placeholder="AIza..."></label>
+        <label>Modell (alle im Gratis-Tarif)
+          <select id="s-model">
+            <option value="gemini-3.8-flash">Gemini 3.8 Flash (empfohlen)</option>
+            <option value="gemini-4-hydrogen">Gemini 4 Hydrogen</option>
+            <option value="gemini-3.6-flash">Gemini 3.6 Flash</option>
+            <option value="gemini-3.5-flash-lite">Gemini 3.5 Flash-Lite (am schnellsten)</option>
+          </select>
+        </label>
+        <label>Strenge bei Zunahme
+          <select id="s-strict">
+            <option value="1">Sanft</option>
+            <option value="2" selected>Deutlich</option>
+            <option value="3">Richtig sauer</option>
+          </select>
+        </label>
+      </div>
+
+      <div class="card">
+        <h2>E-Mail-Erinnerungen</h2>
+        <p class="muted">Die Erinnerungen morgens und abends verschickt GitHub Actions. Die Mailadresse trägst du im GitHub-Repo als Secret <code>MAIL_TO</code> ein (siehe README) – nicht hier, weil eine statische Seite keine Mails senden kann.</p>
+      </div>
+
+      <div class="card">
+        <h2>Daten</h2>
+        <p class="muted">Alles liegt nur in diesem Browser. Mach ab und zu ein Backup.</p>
+        <div class="actions">
+          <button id="export-btn">Backup herunterladen</button>
+          <label class="file-btn">Backup laden <input type="file" id="import-input" accept="application/json"></label>
+        </div>
+      </div>
+      <button id="settings-save" class="primary">Einstellungen speichern</button>
+    </section>
+  </main>
+
+  <div id="toast" class="toast hidden"></div>
+  <script type="module" src="app.js"></script>
+</body>
+</html>
