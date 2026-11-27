@@ -1,0 +1,69 @@
+name: Erinnerung per Mail
+
+on:
+  schedule:
+    # GitHub rechnet in UTC. 6:00 UTC = 7:00 Uhr (Winter) / 8:00 Uhr (Sommer) in Deutschland
+    - cron: "0 6 * * *"
+    # 19:00 UTC = 20:00 Uhr (Winter) / 21:00 Uhr (Sommer)
+    - cron: "0 19 * * *"
+  workflow_dispatch: {}   # zum Testen: Actions-Tab → "Run workflow"
+
+jobs:
+  mail:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Mail senden
+        env:
+          SMTP_HOST: ${{ secrets.SMTP_HOST }}
+          SMTP_PORT: ${{ secrets.SMTP_PORT }}
+          SMTP_USER: ${{ secrets.SMTP_USER }}
+          SMTP_PASS: ${{ secrets.SMTP_PASS }}
+          MAIL_TO: ${{ secrets.MAIL_TO }}
+          SITE_URL: ${{ vars.SITE_URL }}
+          BUDDY_NAMES: ${{ vars.BUDDY_NAMES }}
+        run: |
+          python3 - <<'EOF'
+          import os, random, smtplib, ssl
+          from datetime import datetime, timezone
+          from email.message import EmailMessage
+
+          morning = datetime.now(timezone.utc).hour < 12
+          names = [n.strip() for n in (os.environ.get("BUDDY_NAMES") or "Dein Buddy").split(",") if n.strip()]
+          who = random.choice(names)
+          url = os.environ.get("SITE_URL") or ""
+
+          if morning:
+              subject = f"{who}: Ab auf die Waage ⚖️"
+              lines = [
+                  "Guten Morgen! Noch vor dem Frühstück wiegen, dann eintragen.",
+                  "Morgens, nüchtern, nach dem Klo – du weißt Bescheid. Eintragen!",
+                  "Neuer Tag, neue Zahl. Ich will sie sehen.",
+              ]
+          else:
+              subject = f"{who}: Wie war dein Tag? 🍽️"
+              lines = [
+                  "Abendgewicht und Kalorien von heute eintragen, bitte. Ziel: mindestens 700 kcal Defizit.",
+                  "Bevor du aufs Sofa fällst: Gewicht und Kalorien rein. 1000 Defizit wäre super.",
+                  "Na, wie viel hast du heute gegessen? Ehrlich eintragen!",
+              ]
+          body = random.choice(lines) + (f"\n\n{url}" if url else "")
+
+          msg = EmailMessage()
+          msg["Subject"] = subject
+          msg["From"] = os.environ["SMTP_USER"]
+          msg["To"] = os.environ["MAIL_TO"]
+          msg.set_content(body)
+
+          port = int(os.environ.get("SMTP_PORT") or 465)
+          host = os.environ["SMTP_HOST"]
+          if port == 465:
+              with smtplib.SMTP_SSL(host, port, context=ssl.create_default_context()) as s:
+                  s.login(os.environ["SMTP_USER"], os.environ["SMTP_PASS"])
+                  s.send_message(msg)
+          else:
+              with smtplib.SMTP(host, port) as s:
+                  s.starttls(context=ssl.create_default_context())
+                  s.login(os.environ["SMTP_USER"], os.environ["SMTP_PASS"])
+                  s.send_message(msg)
+          print("Mail gesendet")
+          EOF
