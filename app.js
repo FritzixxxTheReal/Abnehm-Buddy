@@ -23,6 +23,12 @@ let settings = LS.get("ab_settings", {
   key: "", model: "gemini-3.8-flash", strict: "2", personaMode: "random",
 });
 if (String(settings.model).startsWith("claude")) settings.model = "gemini-3.8-flash";
+// Für die Synchronisation: wann zuletzt geändert, welche Motivationsbilder gelöscht wurden
+let personsAt = LS.get("ab_persons_at", 0);
+let mDeleted = LS.get("ab_mdeleted", []);
+let syncCfg = LS.get("ab_sync", { owner: "", repo: "abnehm-buddy-daten", token: "", last: null });
+function touchPersons() { personsAt = Date.now(); LS.set("ab_persons", persons); LS.set("ab_persons_at", personsAt); scheduleSync(); }
+function touchSettings() { settings.updatedAt = Date.now(); LS.set("ab_settings", settings); scheduleSync(); }
 
 const DB_NAME = "abnehm-buddy";
 function openDb() {
@@ -266,6 +272,7 @@ async function getFeedback(day) {
       LS.set("ab_feedback", feedback.slice(0, 200));
       renderFeedback();
     }
+    scheduleSync();
   } catch (err) {
     console.error(err);
     const s = err?.status;
@@ -313,10 +320,12 @@ async function saveDay() {
     e.photoId = id;
     pendingPhoto = null;
   }
+  e.updatedAt = Date.now();
   entries[day] = e;
   LS.set("ab_entries", entries);
   renderAll();
   toast("Gespeichert");
+  scheduleSync();
   return day;
 }
 
@@ -467,11 +476,14 @@ $("m-input").addEventListener("change", async (ev) => {
   ev.target.value = ""; $("m-caption").value = "";
   await renderMotivation();
   toast(files.length === 1 ? "Bild hinzugefügt" : `${files.length} Bilder hinzugefügt`);
+  scheduleSync();
 });
 $("m-grid").addEventListener("click", async (ev) => {
   const id = ev.target.dataset.mdel; if (!id) return;
   await storeDelete("motivation", id);
+  mDeleted.push(id); LS.set("ab_mdeleted", mDeleted);
   renderMotivation();
+  scheduleSync();
 });
 $("slide-prev").addEventListener("click", () => { showSlide(slideIdx - 1); restartSlideTimer(); });
 $("slide-next").addEventListener("click", () => { showSlide(slideIdx + 1); restartSlideTimer(); });
@@ -495,19 +507,19 @@ $("p-add").addEventListener("click", () => {
   const name = $("p-name").value.trim();
   if (!name) { toast("Name fehlt"); return; }
   persons.push({ name, age: $("p-age").value.trim(), rel: $("p-rel").value.trim(), style: $("p-style").value.trim() });
-  LS.set("ab_persons", persons);
+  touchPersons();
   ["p-name", "p-age", "p-rel", "p-style"].forEach((id) => ($(id).value = ""));
   renderPersons(); toast(name + " hinzugefügt");
 });
 $("persons-list").addEventListener("click", (ev) => {
   const i = ev.target.dataset.del; if (i == null) return;
-  persons.splice(Number(i), 1); LS.set("ab_persons", persons); renderPersons();
+  persons.splice(Number(i), 1); touchPersons(); renderPersons();
 });
-$("persona-mode").addEventListener("change", (ev) => { settings.personaMode = ev.target.value; LS.set("ab_settings", settings); });
+$("persona-mode").addEventListener("change", (ev) => { settings.personaMode = ev.target.value; touchSettings(); });
 
 $("settings-save").addEventListener("click", () => {
   for (const k of ["sex", "age", "height", "activity", "tdee", "key", "model", "strict"]) settings[k] = $("s-" + k).value.trim();
-  LS.set("ab_settings", settings); renderSettings(); updateDeficit(); toast("Einstellungen gespeichert");
+  touchSettings(); renderSettings(); updateDeficit(); toast("Einstellungen gespeichert");
 });
 
 $("export-btn").addEventListener("click", async () => {
@@ -524,12 +536,226 @@ $("import-input").addEventListener("change", async (ev) => {
     settings = { ...settings, ...(data.settings || {}), key: settings.key };
     for (const [id, src] of Object.entries(data.photos || {})) await photoPut(id, src);
     for (const [id, m] of Object.entries(data.motivation || {})) await storePut("motivation", id, m);
-    LS.set("ab_entries", entries); LS.set("ab_persons", persons); LS.set("ab_feedback", feedback); LS.set("ab_settings", settings);
+    // Geladenes Backup gilt als neuester Stand
+    const now = Date.now();
+    for (const d of Object.keys(entries)) entries[d].updatedAt = now;
+    LS.set("ab_entries", entries); LS.set("ab_feedback", feedback);
+    touchPersons(); touchSettings();
     loadDay($("entry-date").value); renderAll(); toast("Backup geladen");
   } catch { toast("Backup-Datei ist ungültig"); }
 });
+
+// ---------- Synchronisation über ein privates GitHub-Repo ----------
+// Aufbau im Daten-Repo:  data.json  +  photos/<id>.jpg  +  motivation/<id>.jpg
+// Zusammenführen: pro Tag gewinnt der zuletzt geänderte Eintrag; Personen und Einstellungen als Ganzes;
+// Feedback wird vereinigt. API-Keys und der Token selbst werden nie hochgeladen.
+const SYNC_SETTING_KEYS = ["sex", "age", "height", "activity", "tdee", "model", "strict", "personaMode"];
+let syncRunning = false, syncQueued = false, syncTimer = null, lastVisibleSync = 0;
+
+class SyncError extends Error { constructor(status, msg) { super(msg || `HTTP ${status}`); this.status = status; } }
+const syncReady = () => syncCfg.owner && syncCfg.repo && syncCfg.token;
+
+function utf8ToB64(s) {
+  const bytes = new TextEncoder().encode(s);
+  let bin = "";
+  for (let i = 0; i < bytes.length; i += 0x8000) bin += String.fromCharCode(...bytes.subarray(i, i + 0x8000));
+  return btoa(bin);
+}
+function b64ToUtf8(b64) {
+  const bin = atob(b64.replace(/\s/g, ""));
+  return new TextDecoder().decode(Uint8Array.from(bin, (c) => c.charCodeAt(0)));
+}
+function blobToDataUrl(blob) {
+  return new Promise((res, rej) => { const r = new FileReader(); r.onload = () => res(r.result); r.onerror = rej; r.readAsDataURL(blob); });
+}
+
+function gh(path, opts = {}) {
+  const url = `https://api.github.com/repos/${encodeURIComponent(syncCfg.owner)}/${encodeURIComponent(syncCfg.repo)}/contents/${path}`;
+  return fetch(url, {
+    ...opts,
+    cache: "no-store",
+    headers: {
+      Authorization: `Bearer ${syncCfg.token}`,
+      Accept: "application/vnd.github+json",
+      "X-GitHub-Api-Version": "2022-11-28",
+      ...(opts.headers || {}),
+    },
+  });
+}
+async function ghGetJson(path) {
+  const r = await gh(path);
+  if (r.status === 404) return { data: null, sha: null };
+  if (!r.ok) throw new SyncError(r.status);
+  const meta = await r.json();
+  let text;
+  if (meta.encoding === "base64" && meta.content) text = b64ToUtf8(meta.content);
+  else { // Dateien über 1 MB liefert die API nur roh
+    const raw = await gh(path, { headers: { Accept: "application/vnd.github.raw+json" } });
+    if (!raw.ok) throw new SyncError(raw.status);
+    text = await raw.text();
+  }
+  return { data: JSON.parse(text), sha: meta.sha };
+}
+async function ghPut(path, b64, sha, message) {
+  const r = await gh(path, { method: "PUT", body: JSON.stringify({ message, content: b64, ...(sha ? { sha } : {}) }) });
+  if (!r.ok) throw new SyncError(r.status);
+}
+async function ghList(dir) {
+  const r = await gh(dir);
+  if (r.status === 404) return new Set();
+  if (!r.ok) throw new SyncError(r.status);
+  const list = await r.json();
+  return new Set(Array.isArray(list) ? list.map((f) => f.name) : []);
+}
+async function ghGetImage(path) {
+  const r = await gh(path, { headers: { Accept: "application/vnd.github.raw+json" } });
+  if (!r.ok) throw new SyncError(r.status);
+  return blobToDataUrl(new Blob([await r.blob()], { type: "image/jpeg" }));
+}
+
+function mergeRemote(remote) {
+  const r = remote || {};
+  for (const [d, re] of Object.entries(r.entries || {})) {
+    const le = entries[d];
+    if (!le || (re.updatedAt || 0) > (le.updatedAt || 0)) entries[d] = re;
+  }
+  if ((r.personsAt || 0) > personsAt) { persons = r.persons || []; personsAt = r.personsAt; }
+  if ((r.settings?.updatedAt || 0) > (settings.updatedAt || 0)) {
+    for (const k of SYNC_SETTING_KEYS) if (k in r.settings) settings[k] = r.settings[k];
+    settings.updatedAt = r.settings.updatedAt;
+  }
+  const seen = new Set(feedback.map((f) => f.at + "|" + f.who));
+  for (const f of r.feedback || []) if (!seen.has(f.at + "|" + f.who)) feedback.push(f);
+  feedback.sort((a, b) => b.at.localeCompare(a.at));
+  feedback = feedback.slice(0, 200);
+  mDeleted = [...new Set([...mDeleted, ...(r.mDeleted || [])])];
+
+  LS.set("ab_entries", entries); LS.set("ab_persons", persons); LS.set("ab_persons_at", personsAt);
+  LS.set("ab_settings", settings); LS.set("ab_feedback", feedback); LS.set("ab_mdeleted", mDeleted);
+}
+
+function setSyncStatus(text, isError = false) {
+  const el = $("sync-status");
+  if (el) { el.textContent = text; el.style.color = isError ? "var(--bad)" : ""; }
+  const badge = $("sync-badge");
+  if (badge) badge.textContent = syncReady() ? (isError ? "⚠ Sync" : syncRunning ? "↻ Sync…" : "✓ Sync") : "";
+}
+
+async function runSync(attempt = 0) {
+  const dayShown = $("entry-date").value;
+  const before = JSON.stringify(entries[dayShown] || null);
+
+  // 1. Stand vom Server holen und zusammenführen
+  const { data: remote, sha } = await ghGetJson("data.json");
+  mergeRemote(remote);
+
+  // 2. Motivationsbilder: Gelöschte entfernen, fehlende holen
+  const localM = await storeAll("motivation");
+  for (const id of mDeleted) if (localM[id]) { await storeDelete("motivation", id); delete localM[id]; }
+  const [remotePhotos, remoteM] = await Promise.all([ghList("photos"), ghList("motivation")]);
+  for (const [id, meta] of Object.entries(remote?.motivation || {})) {
+    if (localM[id] || mDeleted.includes(id) || !remoteM.has(id + ".jpg")) continue;
+    const src = await ghGetImage(`motivation/${id}.jpg`);
+    localM[id] = { ...meta, src };
+    await storePut("motivation", id, localM[id]);
+  }
+  for (const [id, m] of Object.entries(localM)) {
+    if (!remoteM.has(id + ".jpg")) await ghPut(`motivation/${id}.jpg`, m.src.split(",")[1], null, "Motivationsbild");
+  }
+
+  // 3. Tagesfotos: fehlende holen bzw. hochladen
+  const localP = await photoAll();
+  for (const e of Object.values(entries)) {
+    const id = e.photoId; if (!id) continue;
+    if (!localP[id] && remotePhotos.has(id + ".jpg")) { localP[id] = await ghGetImage(`photos/${id}.jpg`); await photoPut(id, localP[id]); }
+    else if (localP[id] && !remotePhotos.has(id + ".jpg")) await ghPut(`photos/${id}.jpg`, localP[id].split(",")[1], null, "Foto");
+  }
+
+  // 4. Zusammengeführten Stand hochladen
+  const out = {
+    version: 1, savedAt: new Date().toISOString(),
+    entries, persons, personsAt, feedback, mDeleted,
+    settings: Object.fromEntries([...SYNC_SETTING_KEYS, "updatedAt"].map((k) => [k, settings[k]])),
+    motivation: Object.fromEntries(Object.entries(localM).map(([id, m]) => [id, { caption: m.caption || "", added: m.added }])),
+  };
+  try {
+    await ghPut("data.json", utf8ToB64(JSON.stringify(out)), sha, "Sync " + out.savedAt);
+  } catch (err) {
+    // Anderes Gerät war schneller → nochmal von vorn
+    if ((err.status === 409 || err.status === 422) && attempt < 2) return runSync(attempt + 1);
+    throw err;
+  }
+
+  renderAll();
+  if (JSON.stringify(entries[dayShown] || null) !== before) loadDay(dayShown);
+}
+
+async function syncNow() {
+  if (!syncReady()) return;
+  if (syncRunning) { syncQueued = true; return; }
+  syncRunning = true; setSyncStatus("Synchronisiere…");
+  try {
+    await runSync();
+    syncCfg.last = new Date().toISOString(); LS.set("ab_sync", syncCfg);
+    syncRunning = false;
+    setSyncStatus("Zuletzt synchronisiert: " + new Date(syncCfg.last).toLocaleString("de-DE", { dateStyle: "short", timeStyle: "short" }));
+  } catch (err) {
+    console.error(err);
+    syncRunning = false;
+    const s = err.status;
+    setSyncStatus(
+      s === 401 ? "Sync fehlgeschlagen: Token ungültig oder abgelaufen."
+      : s === 403 ? "Sync fehlgeschlagen: Der Token darf nicht schreiben (Contents: Read and write freigeben)."
+      : s === 404 ? "Sync fehlgeschlagen: Repo nicht gefunden. Benutzername, Repo-Name und Token-Freigabe prüfen."
+      : !navigator.onLine ? "Offline – wird synchronisiert, sobald du wieder Internet hast."
+      : "Sync fehlgeschlagen: " + err.message, true);
+  }
+  if (syncQueued) { syncQueued = false; syncNow(); }
+}
+function scheduleSync() {
+  if (!syncReady()) return;
+  clearTimeout(syncTimer);
+  syncTimer = setTimeout(syncNow, 1500);
+}
+
+function renderSyncSettings() {
+  $("sync-repo").value = syncCfg.repo || "abnehm-buddy-daten";
+  $("sync-token").value = syncCfg.token || "";
+  setSyncStatus(syncReady()
+    ? (syncCfg.last ? "Zuletzt synchronisiert: " + new Date(syncCfg.last).toLocaleString("de-DE", { dateStyle: "short", timeStyle: "short" }) : "Noch nicht synchronisiert.")
+    : "Nicht eingerichtet – Daten bleiben nur auf diesem Gerät.");
+}
+$("sync-save").addEventListener("click", async () => {
+  const token = $("sync-token").value.trim();
+  const repo = $("sync-repo").value.trim() || "abnehm-buddy-daten";
+  if (!token) { setSyncStatus("Bitte den Schlüssel eintragen.", true); return; }
+  setSyncStatus("Prüfe Schlüssel…");
+  try {
+    // Benutzername aus dem Schlüssel ermitteln
+    const r = await fetch("https://api.github.com/user", {
+      cache: "no-store",
+      headers: { Authorization: `Bearer ${token}`, Accept: "application/vnd.github+json", "X-GitHub-Api-Version": "2022-11-28" },
+    });
+    if (!r.ok) { setSyncStatus(r.status === 401 ? "Schlüssel ungültig oder abgelaufen." : `Schlüssel konnte nicht geprüft werden (HTTP ${r.status}).`, true); return; }
+    syncCfg = { ...syncCfg, owner: (await r.json()).login, repo, token };
+    LS.set("ab_sync", syncCfg);
+    syncNow();
+  } catch { setSyncStatus("Keine Verbindung zu GitHub.", true); }
+});
+$("sync-off").addEventListener("click", () => {
+  syncCfg = { owner: "", repo: syncCfg.repo, token: "", last: null };
+  LS.set("ab_sync", syncCfg); renderSyncSettings(); setSyncStatus("Sync auf diesem Gerät ausgeschaltet. Deine Daten hier bleiben erhalten.");
+});
+$("sync-now").addEventListener("click", syncNow);
+// Wenn du die Seite wieder öffnest (z. B. App-Wechsel am Handy), neuen Stand holen
+document.addEventListener("visibilitychange", () => {
+  if (document.visibilityState === "visible" && Date.now() - lastVisibleSync > 30000) { lastVisibleSync = Date.now(); syncNow(); }
+});
+window.addEventListener("online", () => scheduleSync());
 
 // ---------- Start ----------
 $("entry-date").value = todayIso();
 loadDay(todayIso());
 renderAll();
+renderSyncSettings();
+if (syncReady()) { lastVisibleSync = Date.now(); syncNow(); }
