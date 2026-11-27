@@ -85,6 +85,10 @@ button:disabled { opacity: .6; cursor: wait; }
 .person { display: flex; justify-content: space-between; align-items: center; gap: 8px;
   padding: 10px 0; border-bottom: 1px solid var(--line); }
 .person:last-child { border-bottom: none; }
+.person { flex-wrap: wrap; }
+.person > div:first-child { flex: 1 1 200px; min-width: 0; }
+.person-btns { display: flex; gap: 6px; flex-shrink: 0; }
+.person-btns button { padding: 6px 10px; font-size: .9rem; }
 .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(140px, 1fr)); gap: 8px; }
 .grid figure { margin: 0; }
 .grid img { width: 100%; aspect-ratio: 3/4; object-fit: cover; border-radius: 8px; }
@@ -108,3 +112,17 @@ th, td { text-align: left; padding: 6px 8px; border-bottom: 1px solid var(--line
 .grid figure { position: relative; }
 .grid .del { position: absolute; top: 4px; right: 4px; padding: 2px 8px; font-size: .8rem; }
 code { background: var(--bg); padding: 1px 4px; border-radius: 4px; }
+.fb-status { background: var(--card); border: 1px solid var(--line); border-radius: 12px;
+  padding: 12px 16px; margin-bottom: 16px; }
+.fb-bar { height: 4px; background: var(--line); border-radius: 2px; overflow: hidden; margin-bottom: 10px; }
+.fb-bar span { display: block; height: 100%; width: 35%; background: var(--accent); border-radius: 2px;
+  animation: fb-slide 1.4s ease-in-out infinite; }
+@keyframes fb-slide { from { transform: translateX(-100%); } to { transform: translateX(300%); } }
+.fb-line { display: flex; justify-content: space-between; gap: 12px; align-items: baseline; }
+.fb-hint { margin: 6px 0 0; font-size: .8rem; }
+.fb-status.error { border-color: var(--bad); }
+.fb-status.error .fb-bar, .fb-status.error .fb-hint, .fb-status.error #fb-elapsed { display: none; }
+.fb-status.error #fb-step { color: var(--bad); }
+.bubble.live { border: 1px dashed var(--accent); }
+.bubble.live p:empty::after { content: "…"; color: var(--muted); }
+@media (prefers-reduced-motion: reduce) { .fb-bar span { animation: none; width: 100%; opacity: .5; } }
