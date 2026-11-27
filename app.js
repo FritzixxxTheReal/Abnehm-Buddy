@@ -226,24 +226,71 @@ class ApiError extends Error { constructor(msg, status) { super(msg); this.statu
 
 // Alle Gratis-Modelle; das gewählte wird zuerst probiert, die anderen sind Ersatz bei Überlastung.
 const ALL_MODELS = ["gemini-3.8-flash", "gemini-4-hydrogen", "gemini-3.6-flash", "gemini-3.5-flash-lite"];
+const MODEL_NAMES = { "gemini-3.8-flash": "Gemini 3.8 Flash", "gemini-4-hydrogen": "Gemini 4 Hydrogen",
+  "gemini-3.6-flash": "Gemini 3.6 Flash", "gemini-3.5-flash-lite": "Gemini 3.5 Flash-Lite" };
+const modelName = (m) => MODEL_NAMES[m] || m;
 const RETRYABLE = new Set([429, 500, 502, 503, 504]);
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
-let geminiStatus = () => {};
+const GEMINI_STREAM_URL = (model) => GEMINI_URL(model).replace(/:generateContent$/, ":streamGenerateContent?alt=sse");
 
-async function geminiOnce(model, body) {
+// ---------- Statusanzeige beim Feedback ----------
+const progress = {
+  start: 0, timer: null,
+  show() {
+    this.start = Date.now(); $("fb-status").classList.remove("hidden", "error");
+    this.step("Wird vorbereitet…");
+    clearInterval(this.timer); this.tick(); this.timer = setInterval(() => this.tick(), 1000);
+  },
+  tick() { $("fb-elapsed").textContent = `${Math.round((Date.now() - this.start) / 1000)} s`; },
+  step(txt) { $("fb-step").textContent = txt; },
+  hide() { clearInterval(this.timer); $("fb-status").classList.add("hidden"); },
+  fail(msg) { clearInterval(this.timer); this.step(msg); $("fb-status").classList.add("error"); },
+};
+
+// Ein Versuch bei einem Modell. Die Antwort kommt Stück für Stück (Streaming), onText bekommt den bisherigen Text.
+async function geminiOnce(model, body, onText) {
   const ctrl = new AbortController();
-  const timer = setTimeout(() => ctrl.abort(), 90000);
+  let timer;
+  const arm = (ms) => { clearTimeout(timer); timer = setTimeout(() => ctrl.abort(), ms); };
+  arm(60000); // 60 s ohne jedes Lebenszeichen → abbrechen
+  let text = "", blockReason = null, finishReason = null;
   try {
-    const res = await fetch(GEMINI_URL(model), {
+    const res = await fetch(GEMINI_STREAM_URL(model), {
       method: "POST",
       headers: { "Content-Type": "application/json", "x-goog-api-key": settings.key },
       body: JSON.stringify(body),
       signal: ctrl.signal,
     });
-    const data = await res.json().catch(() => ({}));
-    if (!res.ok) throw new ApiError(data?.error?.message || `HTTP ${res.status}`, res.status);
-    return data;
+    if (!res.ok) {
+      const data = await res.json().catch(() => ({}));
+      throw new ApiError(data?.error?.message || `HTTP ${res.status}`, res.status);
+    }
+    const reader = res.body.getReader();
+    const dec = new TextDecoder();
+    let buf = "";
+    const handle = (line) => {
+      line = line.trim();
+      if (!line.startsWith("data:")) return;
+      let chunk; try { chunk = JSON.parse(line.slice(5)); } catch { return; }
+      if (chunk.error) throw new ApiError(chunk.error.message || "Fehler", chunk.error.code || 500);
+      if (chunk.promptFeedback?.blockReason) blockReason = chunk.promptFeedback.blockReason;
+      const cand = chunk.candidates?.[0];
+      if (cand?.finishReason) finishReason = cand.finishReason;
+      const piece = (cand?.content?.parts || []).filter((x) => x.text && !x.thought).map((x) => x.text).join("");
+      if (piece) { text += piece; onText?.(text); }
+    };
+    for (;;) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      arm(30000);
+      buf += dec.decode(value, { stream: true });
+      let nl;
+      while ((nl = buf.indexOf("\n")) >= 0) { handle(buf.slice(0, nl)); buf = buf.slice(nl + 1); }
+    }
+    handle(buf);
+    return { text: text.trim(), blockReason, finishReason };
   } catch (err) {
+    if (text) return { text: text.trim(), blockReason, finishReason: "abgebrochen" }; // Teilantwort behalten
     if (err instanceof ApiError) throw err;
     throw new ApiError(err?.name === "AbortError" ? "Zeitüberschreitung" : "Keine Verbindung", 503);
   } finally {
@@ -252,7 +299,7 @@ async function geminiOnce(model, body) {
 }
 
 // Bei Überlastung (503 "high demand" u. ä.): erst kurz warten und wiederholen, dann auf ein anderes Modell ausweichen.
-async function callGemini(body) {
+async function callGemini(body, label, onText) {
   const order = [settings.model, ...ALL_MODELS.filter((m) => m !== settings.model)];
   let lastErr;
   for (let i = 0; i < order.length; i++) {
@@ -260,23 +307,31 @@ async function callGemini(body) {
     const tries = i === 0 ? 3 : 2;
     for (let t = 0; t < tries; t++) {
       try {
-        if (i > 0 && t === 0) geminiStatus("Ausweichen auf anderes Modell…");
-        return await geminiOnce(model, body);
+        progress.step(`${label}: Anfrage an ${modelName(model)}${t ? ` (Versuch ${t + 1})` : ""}, warte auf Antwort…`);
+        return await geminiOnce(model, body, onText);
       } catch (err) {
         lastErr = err;
         if (err.status === 404) break;               // Modell gibt es nicht (mehr) → nächstes Modell
         if (!RETRYABLE.has(err.status)) throw err;    // z. B. Key ungültig → sofort abbrechen
-        if (t < tries - 1) { geminiStatus("Google ist überlastet, neuer Versuch…"); await sleep(2000 * (t + 1)); }
+        const wait = 2 * (t + 1);
+        if (t < tries - 1) {
+          progress.step(`${label}: ${modelName(model)} ist überlastet, neuer Versuch in ${wait} s…`);
+          await sleep(wait * 1000);
+        } else if (i < order.length - 1) {
+          progress.step(`${label}: ${modelName(model)} ist überlastet, weiche auf ${modelName(order[i + 1])} aus…`);
+          await sleep(800);
+        }
       }
     }
   }
   throw lastErr;
 }
 
-async function askPersona(p, day) {
+async function askPersona(p, day, label, onText) {
   const parts = [];
   const e = entries[day] || {};
   const oldDay = photoNear(day, 14);
+  if (e.photoId) progress.step(`${label}: Fotos werden vorbereitet…`);
   if (e.photoId && oldDay) {
     const [oldImg, newImg] = await Promise.all([photoGet(entries[oldDay].photoId), photoGet(e.photoId)]);
     if (oldImg && newImg) {
@@ -289,34 +344,48 @@ async function askPersona(p, day) {
   }
   parts.push({ text: situationText(day) + "\n\nSchreib mir jetzt deine Nachricht." });
 
-  const data = await callGemini({
+  const r = await callGemini({
     systemInstruction: { parts: [{ text: systemPrompt(p) }] },
     contents: [{ role: "user", parts }],
     safetySettings: SAFETY_OFF,
     generationConfig: { maxOutputTokens: 4096 },
-  });
+  }, label, onText);
 
-  if (data.promptFeedback?.blockReason) return `(Google hat die Anfrage blockiert: ${data.promptFeedback.blockReason}. Ohne Foto nochmal probieren.)`;
-  const cand = data.candidates?.[0];
-  const text = (cand?.content?.parts || []).filter((x) => x.text && !x.thought).map((x) => x.text).join("").trim();
-  if (!text) return `(Keine Antwort erhalten${cand?.finishReason ? ": " + cand.finishReason : ""} – probier es nochmal.)`;
-  return text;
+  if (r.blockReason) return `(Google hat die Anfrage blockiert: ${r.blockReason}. Ohne Foto nochmal probieren.)`;
+  if (!r.text) return `(Keine Antwort erhalten${r.finishReason ? ": " + r.finishReason : ""} – probier es nochmal.)`;
+  return r.text;
 }
 
 async function getFeedback(day) {
   if (!settings.key) { toast("Erst API-Key in den Einstellungen eintragen"); return; }
   if (!persons.length) { toast("Erst unter 'Personen' jemanden anlegen"); return; }
   const who = settings.personaMode === "all" ? persons : [persons[Math.floor(Math.random() * persons.length)]];
-  const btn = $("feedback-btn"); btn.disabled = true; btn.textContent = "Schreibt…";
-  geminiStatus = (txt) => { btn.textContent = txt; };
+  const btn = $("feedback-btn"); btn.disabled = true; btn.textContent = "Läuft…";
+  progress.show();
+  $("fb-status").scrollIntoView({ behavior: "smooth", block: "nearest" });
+  const list = $("feedback-list");
   try {
-    for (const p of who) {
-      const text = await askPersona(p, day);
-      feedback.unshift({ at: new Date().toISOString(), day, who: p.name, text });
-      LS.set("ab_feedback", feedback.slice(0, 200));
-      renderFeedback();
+    for (const [i, p] of who.entries()) {
+      const label = who.length > 1 ? `${p.name} (${i + 1}/${who.length})` : p.name;
+      // Vorläufige Sprechblase, in die die Antwort live geschrieben wird
+      const live = document.createElement("div");
+      live.className = "bubble live";
+      live.innerHTML = `<span class="who">${esc(p.name)}</span> <span class="when">· schreibt…</span><p></p>`;
+      const liveP = live.querySelector("p");
+      const onText = (t) => { liveP.textContent = t; progress.step(`${label} schreibt…`); };
+      if (!feedback.length) list.innerHTML = "";
+      list.prepend(live);
+      try {
+        const text = await askPersona(p, day, label, onText);
+        feedback.unshift({ at: new Date().toISOString(), day, who: p.name, text });
+        LS.set("ab_feedback", feedback.slice(0, 200));
+      } finally {
+        live.remove();
+        renderFeedback();
+      }
     }
     scheduleSync();
+    progress.hide();
   } catch (err) {
     console.error(err);
     const s = err?.status;
@@ -325,9 +394,8 @@ async function getFeedback(day) {
       : s === 429 ? "Gratis-Kontingent erschöpft oder zu viele Anfragen – später nochmal"
       : s >= 500 ? "Alle Gemini-Modelle sind gerade überlastet – in ein paar Minuten nochmal probieren. Deine Daten sind gespeichert."
       : (err?.message || "Fehler bei der KI");
-    toast(msg);
+    progress.fail(msg);
   } finally {
-    geminiStatus = () => {};
     btn.disabled = false; btn.textContent = "Speichern + Feedback holen";
   }
 }
@@ -433,7 +501,8 @@ function renderPersons() {
     ? persons.map((p, i) => `<div class="person"><div><strong>${esc(p.name)}</strong>
         <span class="muted">${p.age ? esc(p.age) + " J. · " : ""}${esc(p.rel)}</span>
         ${p.style ? `<div class="muted">${esc(p.style)}</div>` : ""}</div>
-        <button data-del="${i}">Entfernen</button></div>`).join("")
+        <div class="person-btns"><button data-edit="${i}">Bearbeiten</button>
+        <button data-del="${i}">Entfernen</button></div></div>`).join("")
     : `<p class="muted">Noch niemand angelegt.</p>`;
   $("persona-mode").value = settings.personaMode || "random";
 }
@@ -549,17 +618,46 @@ $("entries-table").addEventListener("click", (ev) => {
   document.querySelector('nav button[data-tab="heute"]').click();
 });
 
+let editingPerson = null; // Index der Person, die gerade bearbeitet wird, sonst null
+function resetPersonForm() {
+  editingPerson = null;
+  ["p-name", "p-age", "p-rel", "p-style"].forEach((id) => ($(id).value = ""));
+  $("p-form-title").textContent = "Person hinzufügen";
+  $("p-add").textContent = "Hinzufügen";
+  $("p-cancel").classList.add("hidden");
+}
 $("p-add").addEventListener("click", () => {
   const name = $("p-name").value.trim();
   if (!name) { toast("Name fehlt"); return; }
-  persons.push({ name, age: $("p-age").value.trim(), rel: $("p-rel").value.trim(), style: $("p-style").value.trim() });
+  const p = { name, age: $("p-age").value.trim(), rel: $("p-rel").value.trim(), style: $("p-style").value.trim() };
+  const wasEdit = editingPerson != null && persons[editingPerson];
+  if (wasEdit) persons[editingPerson] = { ...persons[editingPerson], ...p };
+  else persons.push(p);
   touchPersons();
-  ["p-name", "p-age", "p-rel", "p-style"].forEach((id) => ($(id).value = ""));
-  renderPersons(); toast(name + " hinzugefügt");
+  resetPersonForm();
+  renderPersons(); toast(wasEdit ? name + " gespeichert" : name + " hinzugefügt");
 });
+$("p-cancel").addEventListener("click", resetPersonForm);
 $("persons-list").addEventListener("click", (ev) => {
-  const i = ev.target.dataset.del; if (i == null) return;
-  persons.splice(Number(i), 1); touchPersons(); renderPersons();
+  const { del, edit } = ev.target.dataset;
+  if (edit != null) {
+    const p = persons[Number(edit)]; if (!p) return;
+    editingPerson = Number(edit);
+    $("p-name").value = p.name || ""; $("p-age").value = p.age || "";
+    $("p-rel").value = p.rel || ""; $("p-style").value = p.style || "";
+    $("p-form-title").textContent = `${p.name} bearbeiten`;
+    $("p-add").textContent = "Änderungen speichern";
+    $("p-cancel").classList.remove("hidden");
+    $("p-form-title").scrollIntoView({ behavior: "smooth", block: "start" });
+    $("p-name").focus({ preventScroll: true });
+    return;
+  }
+  if (del == null) return;
+  const p = persons[Number(del)];
+  if (p && !confirm(`${p.name} wirklich entfernen?`)) return;
+  persons.splice(Number(del), 1);
+  if (editingPerson != null) resetPersonForm();
+  touchPersons(); renderPersons();
 });
 $("persona-mode").addEventListener("change", (ev) => { settings.personaMode = ev.target.value; touchSettings(); });
 
