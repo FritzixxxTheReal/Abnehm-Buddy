@@ -126,3 +126,4 @@ code { background: var(--bg); padding: 1px 4px; border-radius: 4px; }
 .bubble.live { border: 1px dashed var(--accent); }
 .bubble.live p:empty::after { content: "…"; color: var(--muted); }
 @media (prefers-reduced-motion: reduce) { .fb-bar span { animation: none; width: 100%; opacity: .5; } }
+#fb-step { white-space: pre-line; }
