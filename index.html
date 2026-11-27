@@ -66,6 +66,12 @@
         <button id="feedback-btn">Speichern + Feedback holen</button>
       </div>
 
+      <div id="fb-status" class="fb-status hidden" role="status" aria-live="polite">
+        <div class="fb-bar"><span></span></div>
+        <div class="fb-line"><span id="fb-step"></span><span id="fb-elapsed" class="muted"></span></div>
+        <p class="muted fb-hint">Dauert meist 5–20 Sekunden pro Person, mit Fotos etwas länger.</p>
+      </div>
+
       <div class="card">
         <h2>Feedback</h2>
         <div id="feedback-list"></div>
@@ -112,7 +118,7 @@
     <!-- PERSONEN -->
     <section id="tab-personen" class="tab">
       <div class="card">
-        <h2>Person hinzufügen</h2>
+        <h2 id="p-form-title">Person hinzufügen</h2>
         <p class="muted">Die KI schreibt im Stil dieser Person. Die Person selbst erfährt davon nichts.</p>
         <div class="row">
           <label>Name <input id="p-name" placeholder="z. B. Lisa"></label>
@@ -124,7 +130,10 @@
         <label>Wie redet die Person? (optional)
           <textarea id="p-style" rows="3" placeholder="z. B. direkt, sarkastisch, nennt mich 'Maus', viele Emojis, schwäbischer Dialekt"></textarea>
         </label>
-        <button id="p-add" class="primary">Hinzufügen</button>
+        <div class="actions">
+          <button id="p-add" class="primary">Hinzufügen</button>
+          <button id="p-cancel" class="hidden">Abbrechen</button>
+        </div>
       </div>
       <div class="card">
         <h2>Deine Leute</h2>
