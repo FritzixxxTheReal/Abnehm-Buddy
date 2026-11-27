@@ -1,6 +1,6 @@
 // Abnehm-Buddy – alles läuft im Browser. Daten: localStorage (Einträge) + IndexedDB (Fotos).
 // KI: Google Gemini API (kostenloser Tarif), direkt aus dem Browser aufgerufen.
-const APP_VERSION = "5 (27.11.2026)";
+const APP_VERSION = "6 (27.11.2026)";
 const GEMINI_URL = (model) => `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(model)}:generateContent`;
 
 // ---------- Speicher ----------
@@ -253,7 +253,7 @@ async function geminiOnce(model, body, onText) {
   const ctrl = new AbortController();
   let timer;
   const arm = (ms) => { clearTimeout(timer); timer = setTimeout(() => ctrl.abort(), ms); };
-  arm(60000); // 60 s ohne jedes Lebenszeichen → abbrechen
+  arm(30000); // 30 s ohne jedes Lebenszeichen → abbrechen und anderes Modell probieren
   let text = "", blockReason = null, finishReason = null;
   try {
     const res = await fetch(GEMINI_STREAM_URL(model), {
@@ -300,27 +300,30 @@ async function geminiOnce(model, body, onText) {
 }
 
 // Bei Überlastung (503 "high demand" u. ä.): erst kurz warten und wiederholen, dann auf ein anderes Modell ausweichen.
-async function callGemini(body, label, onText) {
+// report(text) meldet den aktuellen Schritt für diese Person.
+async function callGemini(body, report, onText) {
   const order = [settings.model, ...ALL_MODELS.filter((m) => m !== settings.model)];
   let lastErr;
   for (let i = 0; i < order.length; i++) {
     const model = order[i];
-    const tries = i === 0 ? 3 : 2;
+    const tries = i === 0 ? 2 : 1;
     for (let t = 0; t < tries; t++) {
       try {
-        progress.step(`${label}: Anfrage an ${modelName(model)}${t ? ` (Versuch ${t + 1})` : ""}, warte auf Antwort…`);
+        report(`wartet auf ${modelName(model)}${t ? ` (Versuch ${t + 1})` : ""}…`);
         return await geminiOnce(model, body, onText);
       } catch (err) {
         lastErr = err;
+        // Modell kennt die Einstellung für kurzes Nachdenken nicht → ohne sie nochmal
+        if (err.status === 400 && /thinking/i.test(err.message) && body.generationConfig.thinkingConfig) {
+          delete body.generationConfig.thinkingConfig; t--; continue;
+        }
         if (err.status === 404) break;               // Modell gibt es nicht (mehr) → nächstes Modell
         if (!RETRYABLE.has(err.status)) throw err;    // z. B. Key ungültig → sofort abbrechen
-        const wait = 2 * (t + 1);
         if (t < tries - 1) {
-          progress.step(`${label}: ${modelName(model)} ist überlastet, neuer Versuch in ${wait} s…`);
-          await sleep(wait * 1000);
+          report(`${modelName(model)} überlastet, neuer Versuch in 2 s…`);
+          await sleep(2000);
         } else if (i < order.length - 1) {
-          progress.step(`${label}: ${modelName(model)} ist überlastet, weiche auf ${modelName(order[i + 1])} aus…`);
-          await sleep(800);
+          report(`${modelName(model)} überlastet, nehme ${modelName(order[i + 1])}…`);
         }
       }
     }
@@ -328,11 +331,11 @@ async function callGemini(body, label, onText) {
   throw lastErr;
 }
 
-async function askPersona(p, day, label, onText) {
+async function askPersona(p, day, report, onText) {
   const parts = [];
   const e = entries[day] || {};
   const oldDay = photoNear(day, 14);
-  if (e.photoId) progress.step(`${label}: Fotos werden vorbereitet…`);
+  if (e.photoId) report("Fotos werden vorbereitet…");
   if (e.photoId && oldDay) {
     const [oldImg, newImg] = await Promise.all([photoGet(entries[oldDay].photoId), photoGet(e.photoId)]);
     if (oldImg && newImg) {
@@ -349,12 +352,22 @@ async function askPersona(p, day, label, onText) {
     systemInstruction: { parts: [{ text: systemPrompt(p) }] },
     contents: [{ role: "user", parts }],
     safetySettings: SAFETY_OFF,
-    generationConfig: { maxOutputTokens: 4096 },
-  }, label, onText);
+    // Kurze Messenger-Nachricht: kaum Nachdenken nötig, das spart viel Wartezeit
+    generationConfig: { maxOutputTokens: 2048, thinkingConfig: { thinkingLevel: "low" } },
+  }, report, onText);
 
   if (r.blockReason) return `(Google hat die Anfrage blockiert: ${r.blockReason}. Ohne Foto nochmal probieren.)`;
   if (!r.text) return `(Keine Antwort erhalten${r.finishReason ? ": " + r.finishReason : ""} – probier es nochmal.)`;
   return r.text;
+}
+
+function errorText(err) {
+  const s = err?.status;
+  return (s === 400 && /key/i.test(err.message)) || s === 401 || s === 403 ? "API-Key ungültig"
+    : s === 404 ? "Modell nicht gefunden – in den Einstellungen ein anderes wählen"
+    : s === 429 ? "Gratis-Kontingent erschöpft oder zu viele Anfragen – später nochmal"
+    : s >= 500 ? "Gemini ist gerade überlastet – in ein paar Minuten nochmal probieren"
+    : (err?.message || "Fehler bei der KI");
 }
 
 async function getFeedback(day) {
@@ -365,40 +378,43 @@ async function getFeedback(day) {
   progress.show();
   $("fb-status").scrollIntoView({ behavior: "smooth", block: "nearest" });
   const list = $("feedback-list");
-  try {
-    for (const [i, p] of who.entries()) {
-      const label = who.length > 1 ? `${p.name} (${i + 1}/${who.length})` : p.name;
-      // Vorläufige Sprechblase, in die die Antwort live geschrieben wird
-      const live = document.createElement("div");
-      live.className = "bubble live";
-      live.innerHTML = `<span class="who">${esc(p.name)}</span> <span class="when">· schreibt…</span><p></p>`;
-      const liveP = live.querySelector("p");
-      const onText = (t) => { liveP.textContent = t; progress.step(`${label} schreibt…`); };
-      if (!feedback.length) list.innerHTML = "";
-      list.prepend(live);
-      try {
-        const text = await askPersona(p, day, label, onText);
-        feedback.unshift({ at: new Date().toISOString(), day, who: p.name, text });
-        LS.set("ab_feedback", feedback.slice(0, 200));
-      } finally {
-        live.remove();
-        renderFeedback();
-      }
+  if (!feedback.length) list.innerHTML = "";
+
+  // Alle Personen gleichzeitig fragen, jede mit eigener Statuszeile und eigener Live-Sprechblase
+  const jobs = who.map((p) => {
+    const live = document.createElement("div");
+    live.className = "bubble live";
+    live.innerHTML = `<span class="who">${esc(p.name)}</span> <span class="when">· schreibt…</span><p></p>`;
+    list.prepend(live);
+    return { p, live, state: "startet…" };
+  });
+  const showStates = () => progress.step(jobs.map((j) => `${j.p.name}: ${j.state}`).join("\n"));
+  const reattachLive = () => jobs.filter((j) => j.live.isConnected === false && !j.done).forEach((j) => list.prepend(j.live));
+  showStates();
+
+  const results = await Promise.allSettled(jobs.map(async (j) => {
+    const report = (txt) => { j.state = txt; showStates(); };
+    const onText = (t) => { j.live.querySelector("p").textContent = t; if (j.state !== "schreibt…") report("schreibt…"); };
+    try {
+      const text = await askPersona(j.p, day, report, onText);
+      feedback.unshift({ at: new Date().toISOString(), day, who: j.p.name, text });
+      LS.set("ab_feedback", feedback.slice(0, 200));
+      j.state = "fertig ✓";
+    } catch (err) {
+      j.state = "✗ " + errorText(err);
+      throw err;
+    } finally {
+      j.done = true; j.live.remove();
+      renderFeedback(); reattachLive(); showStates();
     }
-    scheduleSync();
-    progress.hide();
-  } catch (err) {
-    console.error(err);
-    const s = err?.status;
-    const msg = (s === 400 && /key/i.test(err.message)) || s === 401 || s === 403 ? "API-Key ungültig"
-      : s === 404 ? "Modell nicht gefunden – in den Einstellungen ein anderes wählen"
-      : s === 429 ? "Gratis-Kontingent erschöpft oder zu viele Anfragen – später nochmal"
-      : s >= 500 ? "Alle Gemini-Modelle sind gerade überlastet – in ein paar Minuten nochmal probieren. Deine Daten sind gespeichert."
-      : (err?.message || "Fehler bei der KI");
-    progress.fail(msg);
-  } finally {
-    btn.disabled = false; btn.textContent = "Speichern + Feedback holen";
-  }
+  }));
+
+  const failed = results.filter((r) => r.status === "rejected");
+  if (failed.length) console.error(...failed.map((r) => r.reason));
+  if (failed.length < results.length) scheduleSync();
+  if (!failed.length) progress.hide();
+  else progress.fail(jobs.map((j) => `${j.p.name}: ${j.state}`).join("\n"));
+  btn.disabled = false; btn.textContent = "Speichern + Feedback holen";
 }
 
 // ---------- Heute ----------
