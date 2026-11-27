@@ -1,6 +1,6 @@
 // Abnehm-Buddy – alles läuft im Browser. Daten: localStorage (Einträge) + IndexedDB (Fotos).
 // KI: Google Gemini API (kostenloser Tarif), direkt aus dem Browser aufgerufen.
-const APP_VERSION = "4 (27.11.2026)";
+const APP_VERSION = "5 (27.11.2026)";
 const GEMINI_URL = (model) => `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(model)}:generateContent`;
 
 // ---------- Speicher ----------
@@ -571,7 +571,10 @@ document.querySelectorAll("nav button").forEach((b) => b.addEventListener("click
   document.querySelectorAll(".tab").forEach((t) => t.classList.toggle("active", t.id === "tab-" + b.dataset.tab));
 }));
 
-$("entry-date").addEventListener("change", (ev) => loadDay(ev.target.value));
+// Leeres Datum (gelöscht oder unvollständig) → zurück auf heute, sonst zeigt der Browser nur "TT.MM.JJJJ"
+const fixEmptyDate = () => { if (!$("entry-date").value) { $("entry-date").value = todayIso(); loadDay(todayIso()); } };
+$("entry-date").addEventListener("change", (ev) => { if (ev.target.value) loadDay(ev.target.value); else fixEmptyDate(); });
+$("entry-date").addEventListener("blur", fixEmptyDate);
 ["w-morning", "w-evening", "kcal-in", "kcal-sport"].forEach((id) => $(id).addEventListener("input", updateDeficit));
 
 $("photo-input").addEventListener("change", async (ev) => {
