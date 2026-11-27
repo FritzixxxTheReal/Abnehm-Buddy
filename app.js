@@ -224,6 +224,55 @@ const SAFETY_OFF = ["HARM_CATEGORY_HARASSMENT", "HARM_CATEGORY_HATE_SPEECH", "HA
 
 class ApiError extends Error { constructor(msg, status) { super(msg); this.status = status; } }
 
+// Alle Gratis-Modelle; das gewählte wird zuerst probiert, die anderen sind Ersatz bei Überlastung.
+const ALL_MODELS = ["gemini-3.8-flash", "gemini-4-hydrogen", "gemini-3.6-flash", "gemini-3.5-flash-lite"];
+const RETRYABLE = new Set([429, 500, 502, 503, 504]);
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+let geminiStatus = () => {};
+
+async function geminiOnce(model, body) {
+  const ctrl = new AbortController();
+  const timer = setTimeout(() => ctrl.abort(), 90000);
+  try {
+    const res = await fetch(GEMINI_URL(model), {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "x-goog-api-key": settings.key },
+      body: JSON.stringify(body),
+      signal: ctrl.signal,
+    });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) throw new ApiError(data?.error?.message || `HTTP ${res.status}`, res.status);
+    return data;
+  } catch (err) {
+    if (err instanceof ApiError) throw err;
+    throw new ApiError(err?.name === "AbortError" ? "Zeitüberschreitung" : "Keine Verbindung", 503);
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+// Bei Überlastung (503 "high demand" u. ä.): erst kurz warten und wiederholen, dann auf ein anderes Modell ausweichen.
+async function callGemini(body) {
+  const order = [settings.model, ...ALL_MODELS.filter((m) => m !== settings.model)];
+  let lastErr;
+  for (let i = 0; i < order.length; i++) {
+    const model = order[i];
+    const tries = i === 0 ? 3 : 2;
+    for (let t = 0; t < tries; t++) {
+      try {
+        if (i > 0 && t === 0) geminiStatus("Ausweichen auf anderes Modell…");
+        return await geminiOnce(model, body);
+      } catch (err) {
+        lastErr = err;
+        if (err.status === 404) break;               // Modell gibt es nicht (mehr) → nächstes Modell
+        if (!RETRYABLE.has(err.status)) throw err;    // z. B. Key ungültig → sofort abbrechen
+        if (t < tries - 1) { geminiStatus("Google ist überlastet, neuer Versuch…"); await sleep(2000 * (t + 1)); }
+      }
+    }
+  }
+  throw lastErr;
+}
+
 async function askPersona(p, day) {
   const parts = [];
   const e = entries[day] || {};
@@ -240,18 +289,12 @@ async function askPersona(p, day) {
   }
   parts.push({ text: situationText(day) + "\n\nSchreib mir jetzt deine Nachricht." });
 
-  const res = await fetch(GEMINI_URL(settings.model), {
-    method: "POST",
-    headers: { "Content-Type": "application/json", "x-goog-api-key": settings.key },
-    body: JSON.stringify({
-      systemInstruction: { parts: [{ text: systemPrompt(p) }] },
-      contents: [{ role: "user", parts }],
-      safetySettings: SAFETY_OFF,
-      generationConfig: { maxOutputTokens: 4096 },
-    }),
+  const data = await callGemini({
+    systemInstruction: { parts: [{ text: systemPrompt(p) }] },
+    contents: [{ role: "user", parts }],
+    safetySettings: SAFETY_OFF,
+    generationConfig: { maxOutputTokens: 4096 },
   });
-  const data = await res.json().catch(() => ({}));
-  if (!res.ok) throw new ApiError(data?.error?.message || `HTTP ${res.status}`, res.status);
 
   if (data.promptFeedback?.blockReason) return `(Google hat die Anfrage blockiert: ${data.promptFeedback.blockReason}. Ohne Foto nochmal probieren.)`;
   const cand = data.candidates?.[0];
@@ -265,6 +308,7 @@ async function getFeedback(day) {
   if (!persons.length) { toast("Erst unter 'Personen' jemanden anlegen"); return; }
   const who = settings.personaMode === "all" ? persons : [persons[Math.floor(Math.random() * persons.length)]];
   const btn = $("feedback-btn"); btn.disabled = true; btn.textContent = "Schreibt…";
+  geminiStatus = (txt) => { btn.textContent = txt; };
   try {
     for (const p of who) {
       const text = await askPersona(p, day);
@@ -279,9 +323,11 @@ async function getFeedback(day) {
     const msg = (s === 400 && /key/i.test(err.message)) || s === 401 || s === 403 ? "API-Key ungültig"
       : s === 404 ? "Modell nicht gefunden – in den Einstellungen ein anderes wählen"
       : s === 429 ? "Gratis-Kontingent erschöpft oder zu viele Anfragen – später nochmal"
+      : s >= 500 ? "Alle Gemini-Modelle sind gerade überlastet – in ein paar Minuten nochmal probieren. Deine Daten sind gespeichert."
       : (err?.message || "Fehler bei der KI");
     toast(msg);
   } finally {
+    geminiStatus = () => {};
     btn.disabled = false; btn.textContent = "Speichern + Feedback holen";
   }
 }
